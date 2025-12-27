@@ -30,6 +30,10 @@ GH_REPO = os.getenv('GITHUB_REPO')       # e.g., AfterlifeOS/vendor_signed
 GH_PATH = os.getenv('GITHUB_FILE_PATH')  # e.g., signed.mk
 GH_BRANCH = os.getenv('GITHUB_BRANCH')   # e.g., 16
 
+# WELCOME LINKS
+LINK_DEVICE_LIST = os.getenv('LINK_DEVICE_LIST', 'https://google.com')
+LINK_BRINGUP_GUIDE = os.getenv('LINK_BRINGUP_GUIDE', 'https://google.com')
+
 if not API_TOKEN or not ADMIN_CHAT_ID:
     print("❌ Error: Configuration missing in .env!")
     sys.exit(1)
@@ -59,6 +63,48 @@ except ImportError as e:
     sys.exit(1)
 
 logger = logging.getLogger(__name__)
+
+# --- WELCOME HANDLER ---
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ensure this only runs in the configured Maintainer Group
+    if str(update.effective_chat.id) != str(MAINTAINER_GROUP_ID):
+        return
+
+    for member in update.message.new_chat_members:
+        # Don't welcome the bot itself
+        if member.id == context.bot.id:
+            continue
+            
+        mention = member.mention_html()
+        
+        msg = (
+            f"👋 <b>Konnichiwa, {mention}!</b>\n"
+            "Welcome to the team.\n\n"
+            "Before performing your tasks, please strictly follow these points:\n\n"
+            
+            "<b>1. ℹ️ General Information</b>\n"
+            "Check <code>/notes</code> and <code>/help</code> for specific project details.\n\n"
+            
+            "<b>2. 📝 Device Registration</b>\n"
+            f"Please fill your device name in the <a href=\"{LINK_DEVICE_LIST}\">Device List Topic</a>.\n"
+            "<i>Example:</i>\n"
+            "<code>Username: @MufasaXz</code>\n"
+            "<code>Device: Xiaomi Pad 6 (pipa)</code>\n\n"
+            
+            "<b>3. 🛠️ Bring-up Guidelines</b>\n"
+            f"Refer to the <a href=\"{LINK_BRINGUP_GUIDE}\">Bring-up Trees Guide</a> for adaptation standards.\n\n"
+            
+            "<b>4. 🏗️ CI / Build Infrastructure</b>\n"
+            "If you need to use our CI for official builds, please tag admins:\n"
+            "<b>@xSkyyHinohara @Romeo_Delta_Whiskey</b> for access steps.\n\n"
+            
+            "<i>Enjoy your stay, Sir.</i> 🚀"
+        )
+        
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Failed to send welcome message: {e}")
 
 # --- GITHUB HELPER FUNCTION ---
 def add_maintainer_to_github(maintainer_alias):
@@ -875,10 +921,11 @@ def main():
     app.add_handler(CommandHandler("edit_template", edit_template))
     app.add_handler(CommandHandler("remove_template", remove_template))
 
-    # Handler for Admin Replies (must be filtered to be a reply and from admin)
-    # Since we can't easily filter by "is admin" without middleware or checking ID,
-    # we rely on the fact that only Admins trigger the ForceReply state in bot_data.
+    # Handler for Admin Replies
     app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, handle_admin_reply))
+
+    # Handler for New Chat Members (Welcome Message)
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
     
     print(f"🤖 Bot GitHub Integrated & No Previews) is running...")
     app.run_polling()
