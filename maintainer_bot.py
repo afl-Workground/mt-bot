@@ -193,6 +193,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'pending_apps' not in context.bot_data:
         context.bot_data['pending_apps'] = {}
 
+    # 1. ANTI-SPAM CHECK
+    if user.id in context.bot_data['pending_apps']:
+        await update.message.reply_text(
+            "⚠️ <b>Active Application Found</b>\n\n"
+            "You already have a pending application being reviewed.\n"
+            "Please wait for the admin's decision before applying again.", 
+            parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
+
     rules = (
         "<b>🔮 AfterlifeOS Maintainer Application</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -319,10 +329,36 @@ async def get_maintainer_alias(update: Update, context: ContextTypes.DEFAULT_TYP
     return GITHUB_URL
 
 async def get_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_valid_url(update.message.text):
+    url = update.message.text.strip()
+    if not is_valid_url(url):
         await update.message.reply_text("⚠️ Invalid URL. Please provide a valid GitHub link:", disable_web_page_preview=True)
         return GITHUB_URL
-    context.user_data['github'] = update.message.text
+
+    # 2. GITHUB API CHECK
+    if "github.com" in url:
+        try:
+            # Extract username logic
+            clean_url = url.rstrip('/')
+            username = clean_url.split('/')[-1]
+            
+            api_url = f"https://api.github.com/users/{username}"
+            headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
+            
+            r = requests.get(api_url, headers=headers, timeout=5)
+            if r.status_code == 404:
+                await update.message.reply_text(
+                    f"❌ <b>GitHub User Not Found!</b>\n\n"
+                    f"The user '<code>{username}</code>' does not exist on GitHub.\n"
+                    "Please check your link and try again:", 
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+                return GITHUB_URL
+        except Exception as e:
+            logger.warning(f"GitHub API Check failed: {e}")
+            # Continue if API fails (soft fail to avoid blocking user on network error)
+
+    context.user_data['github'] = url
     await update.message.reply_text(
         "<b>Step 4/11: Device Details</b>\n"
         "Enter <b>Device Name & Codename</b>:\n\n"
