@@ -3,6 +3,7 @@ import os
 import logging
 import re
 import base64
+import json
 import requests # Need requests library
 from datetime import datetime, timedelta
 
@@ -39,7 +40,8 @@ try:
         ReplyKeyboardMarkup, 
         ReplyKeyboardRemove, 
         InlineKeyboardMarkup, 
-        InlineKeyboardButton
+        InlineKeyboardButton,
+        ForceReply
     )
     from telegram.constants import ParseMode
     from telegram.ext import (
@@ -448,7 +450,147 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_suitability(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await finalize(update, context)
 
-# UPDATED: Admin Decision Handler with Invite Link & GitHub Commit
+# --- TEMPLATE MANAGEMENT (JSON) ---
+TEMPLATES_FILE = os.path.join(base_dir, 'templates.json')
+
+DEFAULT_TEMPLATES = {
+    "source": "❌ <b>Source Code Issue:</b> The provided device/vendor trees or kernel source are incomplete, inaccessible, or do not meet our standards.",
+    "ownership": "❌ <b>Device Ownership:</b> We require maintainers to physically own the device. Proof of ownership was insufficient.",
+    "history": "❌ <b>Maintainer History:</b> Your maintenance history or activity levels do not meet our current requirements.",
+    "quality": "❌ <b>Quality Standards:</b> The ROM stability or provided builds do not meet AfterlifeOS quality criteria.",
+    "duplicate": "❌ <b>Device Taken:</b> This device already has an active maintainer. We are not looking for a co-maintainer at this time.",
+    "other": "❌ <b>Application Declined:</b> Thank you for your interest, but we cannot accept your application at this time."
+}
+
+def load_templates():
+    if not os.path.exists(TEMPLATES_FILE):
+        save_templates(DEFAULT_TEMPLATES)
+        return DEFAULT_TEMPLATES
+    try:
+        with open(TEMPLATES_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading templates: {e}")
+        return DEFAULT_TEMPLATES
+
+def save_templates(templates):
+    try:
+        with open(TEMPLATES_FILE, 'w') as f:
+            json.dump(templates, f, indent=4)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving templates: {e}")
+        return False
+
+# Load templates into memory on start
+rejection_templates = load_templates()
+
+# --- ADMIN TEMPLATE COMMANDS ---
+async def check_admin(update: Update):
+    # STRICT: Allow ONLY if the message is sent IN the designated Admin Group
+    if str(update.effective_chat.id) != str(ADMIN_CHAT_ID):
+        # We can optionally reply in DM saying "Go to the group", or just ignore/reject.
+        if update.effective_chat.type == 'private':
+            await update.message.reply_text("⛔ Admin commands can only be used in the Maintainer Admin Group.")
+        return False
+    return True
+
+async def show_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+    
+    msg = "<b>📂 Current Rejection Templates:</b>\n\n"
+    for key, text in rejection_templates.items():
+        msg += f"🔑 <b>{key}</b>:\n{text}\n\n"
+    
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def add_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+    
+    args = context.args
+    reply = update.message.reply_to_message
+
+    # Logic: Get Key and Message
+    if reply:
+        # Mode Reply: Format is "/add_template <key>"
+        if not args:
+            await update.message.reply_text("⚠️ Usage (Reply Mode): /add_template <key>")
+            return
+        key = args[0]
+        # Get text with HTML formatting automatically
+        message = reply.text_html or reply.caption_html
+        if not message:
+             await update.message.reply_text("⚠️ The replied message has no text.")
+             return
+    else:
+        # Mode Manual: Format is "/add_template <key> <text>"
+        if len(args) < 2:
+            await update.message.reply_text("⚠️ Usage:\n1. Reply to a formatted message: /add_template <key>\n2. Manual: /add_template <key> <html_text>")
+            return
+        key = args[0]
+        message = ' '.join(args[1:])
+    
+    if key in rejection_templates:
+        await update.message.reply_text(f"⚠️ Template '{key}' already exists. Use /edit_template to modify.")
+        return
+        
+    rejection_templates[key] = message
+    if save_templates(rejection_templates):
+        await update.message.reply_text(f"✅ Template <b>{key}</b> added successfully!\n\n<b>Preview:</b>\n{message}", parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        await update.message.reply_text("❌ Failed to save to database.")
+
+async def edit_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+    
+    args = context.args
+    reply = update.message.reply_to_message
+
+    if reply:
+        if not args:
+            await update.message.reply_text("⚠️ Usage (Reply Mode): /edit_template <key>")
+            return
+        key = args[0]
+        message = reply.text_html or reply.caption_html
+        if not message:
+             await update.message.reply_text("⚠️ The replied message has no text.")
+             return
+    else:
+        if len(args) < 2:
+            await update.message.reply_text("⚠️ Usage:\n1. Reply to a formatted message: /edit_template <key>\n2. Manual: /edit_template <key> <html_text>")
+            return
+        key = args[0]
+        message = ' '.join(args[1:])
+    
+    if key not in rejection_templates:
+        await update.message.reply_text(f"⚠️ Template '{key}' not found.")
+        return
+        
+    rejection_templates[key] = message
+    if save_templates(rejection_templates):
+        await update.message.reply_text(f"✅ Template <b>{key}</b> updated!\n\n<b>Preview:</b>\n{message}", parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        await update.message.reply_text("❌ Failed to save to database.")
+
+async def remove_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /remove_template <key>")
+        return
+
+    key = context.args[0]
+    if key not in rejection_templates:
+        await update.message.reply_text(f"⚠️ Template '{key}' not found.")
+        return
+        
+    del rejection_templates[key]
+    if save_templates(rejection_templates):
+        await update.message.reply_text(f"🗑️ Template <b>{key}</b> removed.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ Failed to save to database.")
+
+# --- ADMIN DECISION HANDLER (DYNAMIC UI) ---
 async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer() 
@@ -457,8 +599,89 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
     action = data[0]
     user_id = int(data[1])
     
-    # --- CONFIRMATION LOGIC ---
-    if action == "pre_accept":
+    # --- LOGIC HANDLING ---
+    
+    # 1. INITIAL REJECT CLICK -> SHOW DYNAMIC TEMPLATES
+    if action == "pre_reject":
+        keyboard = []
+        row = []
+        
+        # Dynamically build buttons from loaded templates
+        for key in rejection_templates.keys():
+            # Create a label (Capitalize key, maybe remove underscores)
+            label = key.replace('_', ' ').title()
+            # If standard keys, we can add emojis (optional beautification)
+            if key == 'source': label = "📦 Source"
+            elif key == 'ownership': label = "📱 Owner"
+            elif key == 'history': label = "🕒 History"
+            elif key == 'quality': label = "📉 Quality"
+            elif key == 'duplicate': label = "👯 Duplicate"
+            elif key == 'other': label = "🚫 Other"
+            
+            row.append(InlineKeyboardButton(label, callback_data=f"sel_reason:{key}:{user_id}"))
+            
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        
+        if row: keyboard.append(row)
+        
+        # Add Cancel/Back button at the bottom
+        keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data=f"reset:{user_id}")])
+        
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # 2. TEMPLATE SELECTED -> ASK FOR OPTIONAL NOTE
+    elif action == "sel_reason":
+        reason_key = data[1]
+        target_uid = int(data[2])
+        
+        context.user_data['temp_reject_reason'] = reason_key
+        context.user_data['temp_reject_uid'] = target_uid
+
+        # Fetch message from dynamic dict, fallback to Generic if key missing
+        reason_text = rejection_templates.get(reason_key, rejection_templates.get('other', "Application Declined."))
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Send Now", callback_data=f"do_reject:send:{target_uid}")],
+            [InlineKeyboardButton("📝 Add Optional Note", callback_data=f"do_reject:note:{target_uid}")],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"pre_reject:{target_uid}")]
+        ]
+        
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # 3. EXECUTE REJECTION OR ASK FOR NOTE
+    elif action == "do_reject":
+        sub_action = data[1]
+        target_uid = int(data[2])
+        
+        reason_key = context.user_data.get('temp_reject_reason', 'other')
+        base_reason = rejection_templates.get(reason_key, "Application Declined.")
+
+        if sub_action == "send":
+            await finalize_rejection(update, context, target_uid, base_reason, None)
+            return
+        
+        elif sub_action == "note":
+            context.bot_data[f"admin_reply_{query.from_user.id}"] = {
+                'target_uid': target_uid,
+                'base_reason': base_reason
+            }
+            
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"✍️ <b>Add Rejection Note for User {target_uid}</b>\n\n"
+                     f"Selected Template: <i>{reason_key}</i>\n"
+                     "Reply to this message with your additional comments.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=ForceReply(selective=True)
+            )
+            return
+
+    # 4. PRE-ACCEPT (Existing Logic)
+    elif action == "pre_accept":
         keyboard = [
             [InlineKeyboardButton("⚠️ Confirm Accept?", callback_data=f"noop:{user_id}")],
             [
@@ -468,16 +691,8 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         return
-    elif action == "pre_reject":
-        keyboard = [
-            [InlineKeyboardButton("⚠️ Confirm Reject?", callback_data=f"noop:{user_id}")],
-            [
-                InlineKeyboardButton("❌ Yes", callback_data=f"reject:{user_id}"),
-                InlineKeyboardButton("🔙 No", callback_data=f"reset:{user_id}")
-            ]
-        ]
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-        return
+
+    # 5. RESET (Back to Main Menu)
     elif action == "reset":
         keyboard = [
             [
@@ -487,16 +702,16 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         return
+
     elif action == "noop":
         return
-    # --------------------------
 
-    admin_user = query.from_user
-    admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.first_name
-
-    original_text = query.message.text_html
-    
+    # --- FINAL ACCEPT LOGIC (Existing) ---
     if action == "accept":
+        admin_user = query.from_user
+        admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.first_name
+        original_text = query.message.text_html
+
         # 1. GENERATE INVITE LINK
         invite_link_text = ""
         if MAINTAINER_GROUP_ID:
@@ -519,53 +734,107 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
         # 2. COMMIT TO GITHUB
         github_status = ""
-        # Retrieve stored user data
         if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
             app_data = context.bot_data['pending_apps'][user_id]
             maintainer_alias = app_data.get('maintainer_alias', 'Unknown')
-            
-            # Execute Commit
             success, msg = add_maintainer_to_github(maintainer_alias)
             github_status = f"\n\n🖥️ <b>GitHub Action:</b>\n{msg}"
-            
-            # Clean up memory
             del context.bot_data['pending_apps'][user_id]
         else:
-            github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory (Bot might have restarted). Please add maintainer manually."
+            github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
         # 3. NOTIFY ADMIN & USER
         new_status = f"\n\n✅ <b>ACCEPTED by {admin_name}</b>{github_status}" 
-        
         user_notification = (
             "🎉 <b>Congratulations!</b>\n\n"
             "Your application for AfterlifeOS Maintainer has been <b>ACCEPTED</b>!\n"
             f"{invite_link_text}\n\n"
             "Welcome to the team! 🚀"
         )
-        
-    else:
-        new_status = f"\n\n❌ <b>REJECTED by {admin_name}</b>"
-        user_notification = (
-            "⚠️ <b>Update on your Application</b>\n\n"
-            "We appreciate your interest in AfterlifeOS.\n"
-            "Unfortunately, your maintainer application has been <b>declined</b> at this time.\n"
-            "You may improve your skills and apply again in the future."
-        )
-        # Clean up memory if rejected
-        if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
-            del context.bot_data['pending_apps'][user_id]
 
-    await query.edit_message_text(
-        text=original_text + new_status,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        await query.edit_message_text(
+            text=original_text + new_status,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        
+        try:
+            await context.bot.send_message(chat_id=user_id, text=user_notification, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Could not notify user {user_id}: {e}")
+
+# Helper to finalize rejection (Used by Callback and MessageHandler)
+async def finalize_rejection(update, context, user_id, base_reason, custom_note):
+    # Determine who is taking the action (from callback or message)
+    if update.callback_query:
+        admin_user = update.callback_query.from_user
+        message = update.callback_query.message
+    else:
+        admin_user = update.message.from_user
+        message = update.message
+        
+    admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.first_name
+    
+    # Construct Reason Text
+    full_reason = base_reason
+    if custom_note:
+        full_reason += f"\n\n📝 <b>Admin Note:</b>\n<i>{custom_note}</i>"
+
+    # Notify User
+    user_notification = (
+        "⚠️ <b>Application Update</b>\n\n"
+        "We appreciate your interest in AfterlifeOS.\n"
+        "Unfortunately, your maintainer application has been <b>declined</b>.\n\n"
+        f"{full_reason}\n\n"
+        "You are welcome to apply again in the future after addressing these points."
     )
     
     try:
         await context.bot.send_message(chat_id=user_id, text=user_notification, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Could not notify user {user_id}: {e}")
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=f"⚠️ Failed to DM user {user_id}. Link was not sent.", disable_web_page_preview=True)
+
+    # Update Admin Message (If possible, we need to find the original application message)
+    # Since we might be in a reply thread, this is tricky. 
+    # If called from Callback, we edit the message.
+    if update.callback_query:
+        original_text = update.callback_query.message.text_html
+        new_status = f"\n\n❌ <b>REJECTED by {admin_name}</b>\nReason: {base_reason}"
+        if custom_note:
+            new_status += f"\nNote: {custom_note}"
+            
+        await update.callback_query.edit_message_text(
+            text=original_text + new_status,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    else:
+        # If called from Reply, we just confirm to admin.
+        await update.message.reply_text(f"✅ Rejection sent to user {user_id}.")
+
+    # Clean up memory
+    if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
+        del context.bot_data['pending_apps'][user_id]
+
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if this reply is for a pending rejection note
+    admin_id = update.message.from_user.id
+    reply_key = f"admin_reply_{admin_id}"
+    
+    if reply_key in context.bot_data:
+        data = context.bot_data[reply_key]
+        target_uid = data['target_uid']
+        base_reason = data['base_reason']
+        custom_note = update.message.text
+        
+        # Execute rejection
+        await finalize_rejection(update, context, target_uid, base_reason, custom_note)
+        
+        # Clean up
+        del context.bot_data[reply_key]
+    else:
+        # Not a rejection note reply, ignore or handle elsewhere
+        pass
 
 def main():
     # Persistence setup: Stores data to 'bot_data.pickle' in the same directory as the script
@@ -599,6 +868,17 @@ def main():
 
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(handle_admin_decision))
+    
+    # Template Management Commands
+    app.add_handler(CommandHandler("show_templates", show_templates))
+    app.add_handler(CommandHandler("add_template", add_template))
+    app.add_handler(CommandHandler("edit_template", edit_template))
+    app.add_handler(CommandHandler("remove_template", remove_template))
+
+    # Handler for Admin Replies (must be filtered to be a reply and from admin)
+    # Since we can't easily filter by "is admin" without middleware or checking ID,
+    # we rely on the fact that only Admins trigger the ForceReply state in bot_data.
+    app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, handle_admin_reply))
     
     print(f"🤖 Bot GitHub Integrated & No Previews) is running...")
     app.run_polling()
