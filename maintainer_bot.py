@@ -167,10 +167,11 @@ def add_maintainer_to_github(maintainer_alias):
         return False, f"❌ GitHub Error: {str(e)}"
 
 # --- CONVERSATION STATES ---
-(RULES_AGREEMENT, FULL_NAME, MAINTAINER_ALIAS, GITHUB_URL, DEVICE_INFO, 
+(RULES_AGREEMENT, SOURCE_TYPE_CHECK, PRIVATE_REASON, PRIVATE_ACCESS_AGREEMENT,
+ FULL_NAME, MAINTAINER_ALIAS, GITHUB_URL, DEVICE_INFO, 
  DEVICE_TREE, DEVICE_COMMON, VENDOR_TREE, VENDOR_COMMON, 
  KERNEL_SOURCE, SUPPORT_LINK, OFFICIAL_ROMS, DURATION, 
- CONTRIBUTION, WHY_JOIN, SUITABILITY) = range(16)
+ CONTRIBUTION, WHY_JOIN, SUITABILITY) = range(19)
 
 # --- HELPER FUNCTIONS ---
 def is_valid_url(url):
@@ -215,6 +216,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def rules_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == "✅ I Accept the Terms":
+        # New Flow: Check Source Code Privacy
+        keyboard = [["🌍 Public", "🔒 Private"]]
+        await update.message.reply_text(
+            "<b>Source Code Availability</b>\n\n"
+            "Are your device trees (Device, Vendor, Kernel) currently <b>Public</b> or <b>Private</b>?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return SOURCE_TYPE_CHECK
+    
+    await update.message.reply_text("❌ <b>Application Declined.</b>", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    return ConversationHandler.END
+
+async def check_source_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    context.user_data['source_type'] = text
+
+    if text == "🌍 Public":
+        # Proceed to normal flow
         await update.message.reply_text(
             "<b>Step 1/11: Identity</b>\n"
             "Please enter your <b>Real Name</b>:\n\n"
@@ -224,9 +244,57 @@ async def rules_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
         return FULL_NAME
+    elif text == "🔒 Private":
+        await update.message.reply_text(
+            "<b>🔒 Private Sources</b>\n\n"
+            "Please explain <b>WHY</b> your sources are private at this moment:\n\n"
+            "💡 <i>Example: 'It is still in early bring-up' or 'I am cleaning up the commits.'</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return PRIVATE_REASON
+    else:
+        await update.message.reply_text(
+            "⚠️ Please select one of the buttons.\n\n"
+            "Are your device trees (Device, Vendor, Kernel) currently <b>Public</b> or <b>Private</b>?",
+            reply_markup=ReplyKeyboardMarkup([["🌍 Public", "🔒 Private"]], one_time_keyboard=True, resize_keyboard=True),
+            parse_mode=ParseMode.HTML
+        )
+        return SOURCE_TYPE_CHECK
+
+async def get_private_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['private_reason'] = update.message.text
     
-    await update.message.reply_text("❌ <b>Application Declined.</b>", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    return ConversationHandler.END
+    keyboard = [["✅ Yes, I Agree", "❌ No, I Refuse"]]
+    await update.message.reply_text(
+        "<b>⚠️ Access Requirement</b>\n\n"
+        "Since your sources are private, we require <b>READ ACCESS</b> to your repositories for review purposes.\n"
+        "If accepted, you must invite our Lead Developers to your private repo.\n\n"
+        "<b>Do you agree to provide access if requested?</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return PRIVATE_ACCESS_AGREEMENT
+
+async def check_private_agreement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "✅ Yes, I Agree":
+        await update.message.reply_text(
+            "<b>Step 1/11: Identity</b>\n"
+            "Please enter your <b>Real Name</b>:\n\n"
+            "💡 <i>Example: John Doe</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardRemove(),
+            disable_web_page_preview=True
+        )
+        return FULL_NAME
+    else:
+        await update.message.reply_text(
+            "❌ <b>Application Declined.</b>\n"
+            "We cannot accept maintainers who refuse to share sources with the core team.",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text
@@ -418,6 +486,25 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'name': data['name']
     }
 
+    # Construct Source Info Segment
+    source_type = data.get('source_type', 'Unknown')
+    source_info = f"<b>📂 SOURCE CODE ({source_type})</b>\n"
+    
+    if source_type == "🔒 Private":
+        p_reason = data.get('private_reason', 'None provided')
+        source_info += (
+            f"<i>⚠️ Private Reason: \"{p_reason}\"</i>\n"
+            f"<i>✅ User agreed to give read access.</i>\n"
+        )
+    
+    source_info += (
+        f"├ <b>Device Tree:</b> {format_link(data['dt'])}\n"
+        f"├ <b>DT Common:</b> {format_link(data['dt_c'])}\n"
+        f"├ <b>Vendor Tree:</b> {format_link(data['vt'])}\n"
+        f"├ <b>VT Common:</b> {format_link(data['vt_c'])}\n"
+        f"└ <b>Kernel:</b> {format_link(data['kernel'])}\n\n"
+    )
+
     admin_msg = (
         "<b>🚀 NEW MAINTAINER APPLICATION</b>\n"
         f"<i>Received: {date_str}</i>\n"
@@ -433,12 +520,7 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"├ <b>Model:</b> <code>{data['device']}</code>\n"
         f"└ <b>Support:</b> {format_link(data['support'], 'Group Link')}\n\n"
         
-        "<b>📂 SOURCE CODE</b>\n"
-        f"├ <b>Device Tree:</b> {format_link(data['dt'])}\n"
-        f"├ <b>DT Common:</b> {format_link(data['dt_c'])}\n"
-        f"├ <b>Vendor Tree:</b> {format_link(data['vt'])}\n"
-        f"├ <b>VT Common:</b> {format_link(data['vt_c'])}\n"
-        f"└ <b>Kernel:</b> {format_link(data['kernel'])}\n\n"
+        f"{source_info}"
         
         "<b>📝 EXPERIENCE & BACKGROUND</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -475,13 +557,20 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        await context.bot.send_message(
+        sent_msg = await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID, 
             text=admin_msg, 
             parse_mode=ParseMode.HTML, 
             disable_web_page_preview=True,
             reply_markup=reply_markup
         )
+        
+        # PIN THE MESSAGE (LOUD)
+        try:
+            await sent_msg.pin(disable_notification=False)
+        except Exception as e:
+            logger.error(f"Failed to pin message: {e}")
+            
         await update.message.reply_text(user_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Failed to send: {e}")
@@ -708,12 +797,18 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
         if sub_action == "send":
             await finalize_rejection(update, context, target_uid, base_reason, None)
+            # Unpin message
+            try:
+                await context.bot.unpin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=query.message.message_id)
+            except Exception as e:
+                logger.warning(f"Could not unpin message: {e}")
             return
         
         elif sub_action == "note":
             context.bot_data[f"admin_reply_{query.from_user.id}"] = {
                 'target_uid': target_uid,
-                'base_reason': base_reason
+                'base_reason': base_reason,
+                'msg_id': query.message.message_id # Save MSG ID for unpinning later via reply
             }
             
             await context.bot.send_message(
@@ -804,6 +899,12 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             disable_web_page_preview=True
         )
         
+        # Unpin message
+        try:
+            await context.bot.unpin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=query.message.message_id)
+        except Exception as e:
+            logger.warning(f"Could not unpin message: {e}")
+        
         try:
             await context.bot.send_message(chat_id=user_id, text=user_notification, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception as e:
@@ -862,6 +963,49 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note)
     if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
         del context.bot_data['pending_apps'][user_id]
 
+async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    notes_text = (
+        "<b>📋 Project Notes & Guidelines</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>1. Bring-up Standards</b>\n"
+        "• Ensure your trees follow the standard AfterlifeOS file structure.\n"
+        "• Remove any bloatware or unnecessary proprietary apps from vendor.\n\n"
+        "<b>2. Commit History</b>\n"
+        "• We value clean git history. Avoid massive squashed commits unless necessary.\n"
+        "• Use proper commit messages (e.g., <code>component: Description</code>).\n\n"
+        "<b>3. Communication</b>\n"
+        "• Join the Maintainer Group immediately after acceptance.\n"
+        "• Report any critical bugs affecting core functionality to the core team.\n\n"
+        "<i>For more details, refer to the pinned messages in the group.</i>"
+    )
+    await update.message.reply_text(notes_text, parse_mode=ParseMode.HTML)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_chat_id = str(update.effective_chat.id)
+    admin_chat_id = str(ADMIN_CHAT_ID)
+
+    if user_chat_id == admin_chat_id:
+        help_text = (
+            "<b>🛡️ Admin Commands</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "<b>Template Management:</b>\n"
+            "• <code>/show_templates</code> - List all rejection templates\n"
+            "• <code>/add_template &lt;key&gt; &lt;text&gt;</code> - Add new template\n"
+            "• <code>/edit_template &lt;key&gt; &lt;text&gt;</code> - Edit existing template\n"
+            "• <code>/remove_template &lt;key&gt;</code> - Remove a template\n\n"
+            "<i>You can also reply to a message with /add_template &lt;key&gt; to save it.</i>"
+        )
+    else:
+        help_text = (
+            "<b>🤖 Maintainer Bot Help</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "• <code>/start</code> - Apply for Maintainer position\n"
+            "• <code>/cancel</code> - Cancel current application\n"
+            "• <code>/notes</code> - Read project guidelines\n"
+        )
+    
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this reply is for a pending rejection note
     admin_id = update.message.from_user.id
@@ -871,11 +1015,19 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         data = context.bot_data[reply_key]
         target_uid = data['target_uid']
         base_reason = data['base_reason']
+        msg_id_to_unpin = data.get('msg_id') # Get stored ID
         custom_note = update.message.text
         
         # Execute rejection
         await finalize_rejection(update, context, target_uid, base_reason, custom_note)
         
+        # Unpin if ID exists
+        if msg_id_to_unpin:
+            try:
+                await context.bot.unpin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=msg_id_to_unpin)
+            except Exception as e:
+                logger.warning(f"Could not unpin message via reply: {e}")
+
         # Clean up
         del context.bot_data[reply_key]
     else:
@@ -893,6 +1045,9 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             RULES_AGREEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, rules_logic)],
+            SOURCE_TYPE_CHECK: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_source_type)],
+            PRIVATE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_private_reason)],
+            PRIVATE_ACCESS_AGREEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_private_agreement)],
             FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
             MAINTAINER_ALIAS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_maintainer_alias)],
             GITHUB_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_github)],
@@ -913,6 +1068,8 @@ def main():
     )
 
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("notes", notes_command))
     app.add_handler(CallbackQueryHandler(handle_admin_decision))
     
     # Template Management Commands
