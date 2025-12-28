@@ -927,6 +927,10 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             # Remove and Trigger Save
             del current_apps[user_id]
             context.bot_data['pending_apps'] = current_apps
+            
+            # CLEAR USER DATA (The interview answers)
+            if user_id in context.application.user_data:
+                context.application.user_data[user_id].clear()
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -1028,6 +1032,10 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
     if user_id in current_apps:
         del current_apps[user_id]
         context.bot_data['pending_apps'] = current_apps
+
+    # CLEAR USER DATA (The interview answers)
+    if user_id in context.application.user_data:
+        context.application.user_data[user_id].clear()
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes_text = (
