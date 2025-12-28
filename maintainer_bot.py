@@ -189,6 +189,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     logger.info(f"User {user.first_name} started conversation.")
     
+    # 0. USERNAME CHECK (Must have @username)
+    if not user.username:
+        await update.message.reply_text(
+            "⛔ <b>No Username Detected</b>\n\n"
+            "To apply for a Maintainer position, you <b>MUST</b> set a Telegram Username first.\n"
+            "This is required for us to contact you and manage permissions.\n\n"
+            "<i>Please set a username in your Telegram Settings and try /start again.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
+
     # Initialize bot_data storage for pending apps if not exists
     if 'pending_apps' not in context.bot_data:
         context.bot_data['pending_apps'] = {}
