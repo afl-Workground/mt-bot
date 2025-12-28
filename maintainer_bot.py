@@ -514,13 +514,13 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # SAVE DATA FOR ADMIN ACTION
-    if 'pending_apps' not in context.bot_data:
-        context.bot_data['pending_apps'] = {}
-    
-    context.bot_data['pending_apps'][user.id] = {
+    # We re-assign the dictionary to context.bot_data to ensure PicklePersistence detects the change
+    current_apps = context.bot_data.get('pending_apps', {})
+    current_apps[user.id] = {
         'maintainer_alias': data['maintainer_alias'],
         'name': data['name']
     }
+    context.bot_data['pending_apps'] = current_apps
 
     # Construct Source Info Segment
     source_type = data.get('source_type', 'Unknown')
@@ -844,7 +844,8 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             context.bot_data[f"admin_reply_{query.from_user.id}"] = {
                 'target_uid': target_uid,
                 'base_reason': base_reason,
-                'msg_id': query.message.message_id # Save MSG ID for unpinning later via reply
+                'msg_id': query.message.message_id, # Save MSG ID for unpinning later via reply
+                'original_text': query.message.text_html
             }
             
             await context.bot.send_message(
@@ -914,12 +915,18 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
         # 2. COMMIT TO GITHUB
         github_status = ""
-        if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
-            app_data = context.bot_data['pending_apps'][user_id]
+        # Access safely
+        current_apps = context.bot_data.get('pending_apps', {})
+        
+        if user_id in current_apps:
+            app_data = current_apps[user_id]
             maintainer_alias = app_data.get('maintainer_alias', 'Unknown')
             success, msg = add_maintainer_to_github(maintainer_alias)
             github_status = f"\n\n🖥️ <b>GitHub Action:</b>\n{msg}"
-            del context.bot_data['pending_apps'][user_id]
+            
+            # Remove and Trigger Save
+            del current_apps[user_id]
+            context.bot_data['pending_apps'] = current_apps
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -950,7 +957,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             logger.error(f"Could not notify user {user_id}: {e}")
 
 # Helper to finalize rejection (Used by Callback and MessageHandler)
-async def finalize_rejection(update, context, user_id, base_reason, custom_note):
+async def finalize_rejection(update, context, user_id, base_reason, custom_note, origin_msg_id=None, origin_text=None):
     # Determine who is taking the action (from callback or message)
     if update.callback_query:
         admin_user = update.callback_query.from_user
@@ -994,13 +1001,33 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note)
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
+    elif origin_msg_id and origin_text:
+        # Reply flow with known origin
+        new_status = f"\n\n❌ <b>REJECTED by {admin_name}</b>\nReason: {base_reason}"
+        if custom_note:
+            new_status += f"\nNote: {custom_note}"
+            
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_CHAT_ID,
+                message_id=origin_msg_id,
+                text=origin_text + new_status,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            await update.message.reply_text(f"✅ Rejection sent and status updated.")
+        except Exception as e:
+            logger.error(f"Failed to edit admin message: {e}")
+            await update.message.reply_text(f"✅ Rejection sent, but failed to update status message: {e}")
     else:
         # If called from Reply, we just confirm to admin.
         await update.message.reply_text(f"✅ Rejection sent to user {user_id}.")
 
-    # Clean up memory
-    if 'pending_apps' in context.bot_data and user_id in context.bot_data['pending_apps']:
-        del context.bot_data['pending_apps'][user_id]
+    # Clean up memory with Persistence Trigger
+    current_apps = context.bot_data.get('pending_apps', {})
+    if user_id in current_apps:
+        del current_apps[user_id]
+        context.bot_data['pending_apps'] = current_apps
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes_text = (
@@ -1055,10 +1082,11 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         target_uid = data['target_uid']
         base_reason = data['base_reason']
         msg_id_to_unpin = data.get('msg_id') # Get stored ID
+        original_text = data.get('original_text')
         custom_note = update.message.text
         
         # Execute rejection
-        await finalize_rejection(update, context, target_uid, base_reason, custom_note)
+        await finalize_rejection(update, context, target_uid, base_reason, custom_note, msg_id_to_unpin, original_text)
         
         # Unpin if ID exists
         if msg_id_to_unpin:
