@@ -321,44 +321,56 @@ async def get_maintainer_alias(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['maintainer_alias'] = update.message.text
     await update.message.reply_text(
         "<b>Step 3/11: Socials</b>\n"
-        "Provide your <b>GitHub Profile URL</b>:\n\n"
-        "💡 <i>Example: https://github.com/johndoe</i>",
+        "Provide your <b>GitHub Username</b>:\n"
+        "<i>(Just the username, e.g., 'johndoe')</i>\n\n"
+        "💡 <i>Example: johndoe</i>",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
     return GITHUB_URL
 
 async def get_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    if not is_valid_url(url):
-        await update.message.reply_text("⚠️ Invalid URL. Please provide a valid GitHub link:", disable_web_page_preview=True)
+    raw_input = update.message.text.strip()
+    
+    # 1. CLEAN INPUT (Extract username from URL if necessary)
+    # Remove 'https://', 'github.com/', trailing slashes, and '@'
+    username = raw_input.replace('https://', '').replace('http://', '').replace('www.', '').replace('github.com/', '').replace('@', '').rstrip('/')
+    
+    # Basic Validation: Username should not contain slashes or spaces after cleaning
+    if '/' in username or ' ' in username or not username:
+        await update.message.reply_text("⚠️ Invalid format. Please enter just your GitHub username (e.g. <code>johndoe</code>):", parse_mode=ParseMode.HTML)
         return GITHUB_URL
 
     # 2. GITHUB API CHECK
-    if "github.com" in url:
-        try:
-            # Extract username logic
-            clean_url = url.rstrip('/')
-            username = clean_url.split('/')[-1]
+    try:
+        api_url = f"https://api.github.com/users/{username}"
+        headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
+        
+        r = requests.get(api_url, headers=headers, timeout=5)
+        
+        if r.status_code == 404:
+            await update.message.reply_text(
+                f"❌ <b>GitHub User Not Found!</b>\n\n"
+                f"The user '<code>{username}</code>' does not exist on GitHub.\n"
+                "Please check the username and try again:", 
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+            return GITHUB_URL
             
-            api_url = f"https://api.github.com/users/{username}"
-            headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
-            
-            r = requests.get(api_url, headers=headers, timeout=5)
-            if r.status_code == 404:
-                await update.message.reply_text(
-                    f"❌ <b>GitHub User Not Found!</b>\n\n"
-                    f"The user '<code>{username}</code>' does not exist on GitHub.\n"
-                    "Please check your link and try again:", 
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True
-                )
-                return GITHUB_URL
-        except Exception as e:
-            logger.warning(f"GitHub API Check failed: {e}")
-            # Continue if API fails (soft fail to avoid blocking user on network error)
+        elif r.status_code != 200:
+            # API Error (Rate limit, etc) - Warn but maybe allow? Or ask again.
+            # Let's allow it but warn, or just retry. For safety, let's ask for retry if it's a server error.
+            # But to be user friendly, if API is down, maybe we shouldn't block.
+            # Let's just log and proceed if it's not a 404.
+            logger.warning(f"GitHub API Error for {username}: {r.status_code}")
 
-    context.user_data['github'] = url
+    except Exception as e:
+        logger.warning(f"GitHub API Check failed: {e}")
+        # Continue if API fails (soft fail)
+
+    context.user_data['github_user'] = username # Save the clean username
+    
     await update.message.reply_text(
         "<b>Step 4/11: Device Details</b>\n"
         "Enter <b>Device Name & Codename</b>:\n\n"
@@ -541,6 +553,11 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"└ <b>Kernel:</b> {format_link(data['kernel'])}\n\n"
     )
 
+    # Construct GitHub Link
+    gh_user = data.get('github_user', 'Unknown')
+    gh_link = f"https://github.com/{gh_user}"
+    gh_display = f'<a href="{gh_link}">{gh_user}</a>'
+
     admin_msg = (
         "<b>🚀 NEW MAINTAINER APPLICATION</b>\n"
         f"<i>Received: {date_str}</i>\n"
@@ -550,7 +567,7 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"├ <b>Maintainer Alias:</b> {data['maintainer_alias']}\n"
         f"├ <b>User:</b> {username}\n"
         f"├ <b>ID:</b> {user.id}\n"
-        f"└ <b>GitHub:</b> {format_link(data['github'], data['github'])}\n\n"
+        f"└ <b>GitHub:</b> {gh_display}\n\n"
         
         "<b>📱 DEVICE INFO</b>\n"
         f"├ <b>Model:</b> <code>{data['device']}</code>\n"
