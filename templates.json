@@ -1,0 +1,8 @@
+{
+    "source": "\u274c <b>Source Code Issue:</b> The provided device/vendor trees or kernel source are incomplete, inaccessible, or do not meet our standards.",
+    "ownership": "\u274c <b>Device Ownership:</b> We require maintainers to physically own the device. Proof of ownership was insufficient.",
+    "history": "\u274c <b>Maintainer History:</b> Your maintenance history or activity levels do not meet our current requirements.",
+    "quality": "\u274c <b>Quality Standards:</b> The ROM stability or provided builds do not meet AfterlifeOS quality criteria.",
+    "duplicate": "\u274c <b>Device Taken:</b> This device already has an active maintainer. We are not looking for a co-maintainer at this time.",
+    "other": "\u274c <b>Application Declined:</b> Thank you for your interest, but we cannot accept your application at this time."
+}
