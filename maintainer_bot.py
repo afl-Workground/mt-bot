@@ -768,12 +768,12 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
     
     data = query.data.split(":")
     action = data[0]
-    user_id = int(data[1])
     
     # --- LOGIC HANDLING ---
     
     # 1. INITIAL REJECT CLICK -> SHOW DYNAMIC TEMPLATES
     if action == "pre_reject":
+        user_id = int(data[1])
         keyboard = []
         row = []
         
@@ -859,6 +859,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 4. PRE-ACCEPT (Existing Logic)
     elif action == "pre_accept":
+        user_id = int(data[1])
         keyboard = [
             [InlineKeyboardButton("⚠️ Confirm Accept?", callback_data=f"noop:{user_id}")],
             [
@@ -871,6 +872,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 5. RESET (Back to Main Menu)
     elif action == "reset":
+        user_id = int(data[1])
         keyboard = [
             [
                 InlineKeyboardButton("✅ Accept", callback_data=f"pre_accept:{user_id}"),
@@ -885,6 +887,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
 
     # --- FINAL ACCEPT LOGIC (Existing) ---
     if action == "accept":
+        user_id = int(data[1])
         admin_user = query.from_user
         admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.first_name
         original_text = query.message.text_html
