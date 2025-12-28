@@ -34,6 +34,9 @@ GH_BRANCH = os.getenv('GITHUB_BRANCH')   # e.g., 16
 LINK_DEVICE_LIST = os.getenv('LINK_DEVICE_LIST', 'https://google.com')
 LINK_BRINGUP_GUIDE = os.getenv('LINK_BRINGUP_GUIDE', 'https://google.com')
 
+# CONFIGURATION
+REJECTION_COOLDOWN_DAYS = 7 # User must wait X days after rejection to apply again
+
 if not API_TOKEN or not ADMIN_CHAT_ID:
     print("❌ Error: Configuration missing in .env!")
     sys.exit(1)
@@ -199,6 +202,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
         return ConversationHandler.END
+
+    # 1. COOLDOWN CHECK (Rejection Waiting Period)
+    cooldowns = context.bot_data.get('rejected_cooldowns', {})
+    if user.id in cooldowns:
+        data = cooldowns[user.id]
+        # Handle Format Compatibility
+        if isinstance(data, datetime):
+            expiry_date = data
+        else:
+            expiry_date = data.get('expiry')
+
+        if datetime.now() < expiry_date:
+            # Still in cooldown
+            formatted_date = expiry_date.strftime("%Y-%m-%d %H:%M UTC")
+            await update.message.reply_text(
+                "⏳ <b>Application Cooldown</b>\n\n"
+                "Your previous application was recently declined.\n"
+                f"You must wait until <b>{formatted_date}</b> before applying again.\n\n"
+                "<i>Please use this time to improve your sources or skills.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            return ConversationHandler.END
+        else:
+            # Cooldown expired, clean up
+            del cooldowns[user.id]
+            context.bot_data['rejected_cooldowns'] = cooldowns
 
     # Initialize bot_data storage for pending apps if not exists
     if 'pending_apps' not in context.bot_data:
@@ -789,6 +818,83 @@ async def remove_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Failed to save to database.")
 
+async def check_cooldowns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+
+    cooldowns = context.bot_data.get('rejected_cooldowns', {})
+    if not cooldowns:
+        await update.message.reply_text("✅ <b>No active cooldowns.</b>", parse_mode=ParseMode.HTML)
+        return
+
+    msg = "<b>⏳ Active Cooldown List:</b>\n\n"
+    active_count = 0
+    to_remove = []
+    
+    now = datetime.now()
+    
+    for uid, data in cooldowns.items():
+        # Handle Format Compatibility
+        if isinstance(data, datetime):
+            expiry = data
+            saved_name = "Unknown"
+        else:
+            expiry = data.get('expiry')
+            saved_name = data.get('name', 'Unknown')
+            
+        if now < expiry:
+            active_count += 1
+            date_str = expiry.strftime("%Y-%m-%d %H:%M")
+            remaining = (expiry - now).days
+            
+            # REAL-TIME FETCH (Get latest username)
+            try:
+                chat = await context.bot.get_chat(uid)
+                if chat.username:
+                    display_name = f"@{chat.username}"
+                else:
+                    display_name = chat.first_name
+            except Exception:
+                display_name = saved_name # Fallback if fetch fails
+            
+            msg += f"👤 <b>{display_name}</b> (<code>{uid}</code>)\n└ 🔓 Unlocks: {date_str} ({remaining} days left)\n\n"
+        else:
+            to_remove.append(uid)
+    
+    # Auto-cleanup expired
+    if to_remove:
+        for uid in to_remove:
+            del cooldowns[uid]
+        context.bot_data['rejected_cooldowns'] = cooldowns
+
+    if active_count == 0:
+        msg = "✅ <b>No active cooldowns.</b> (Cleaned up expired entries)"
+    else:
+        msg += "<i>To remove a cooldown: /remove_cooldown &lt;user_id&gt;</i>"
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+async def remove_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_admin(update): return
+    
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /remove_cooldown <user_id>")
+        return
+        
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid User ID. Must be a number.")
+        return
+
+    cooldowns = context.bot_data.get('rejected_cooldowns', {})
+    
+    if target_id in cooldowns:
+        del cooldowns[target_id]
+        context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Save
+        await update.message.reply_text(f"✅ Cooldown removed for user <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"⚠️ User ID <code>{target_id}</code> is not in the cooldown list.", parse_mode=ParseMode.HTML)
+
 # --- ADMIN DECISION HANDLER (DYNAMIC UI) ---
 async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -831,7 +937,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 2. TEMPLATE SELECTED -> ASK FOR OPTIONAL NOTE
+    # 2. TEMPLATE SELECTED -> ASK FOR COOLDOWN
     elif action == "sel_reason":
         reason_key = data[1]
         target_uid = int(data[2])
@@ -839,28 +945,59 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['temp_reject_reason'] = reason_key
         context.user_data['temp_reject_uid'] = target_uid
 
-        # Fetch message from dynamic dict, fallback to Generic if key missing
-        reason_text = rejection_templates.get(reason_key, rejection_templates.get('other', "Application Declined."))
-
+        # Show Cooldown Options
         keyboard = [
-            [InlineKeyboardButton("✅ Send Now", callback_data=f"do_reject:send:{target_uid}")],
-            [InlineKeyboardButton("📝 Add Optional Note", callback_data=f"do_reject:note:{target_uid}")],
+            [
+                InlineKeyboardButton("🚫 No Cooldown", callback_data=f"sel_cd:0:{target_uid}"),
+                InlineKeyboardButton("3 Days", callback_data=f"sel_cd:3:{target_uid}")
+            ],
+            [
+                InlineKeyboardButton("1 Week", callback_data=f"sel_cd:7:{target_uid}"),
+                InlineKeyboardButton("2 Weeks", callback_data=f"sel_cd:14:{target_uid}"),
+                InlineKeyboardButton("3 Weeks", callback_data=f"sel_cd:21:{target_uid}")
+            ],
+            [
+                InlineKeyboardButton("1 Month", callback_data=f"sel_cd:30:{target_uid}"),
+                InlineKeyboardButton("2 Months", callback_data=f"sel_cd:60:{target_uid}"),
+                InlineKeyboardButton("3 Months", callback_data=f"sel_cd:90:{target_uid}")
+            ],
             [InlineKeyboardButton("🔙 Back", callback_data=f"pre_reject:{target_uid}")]
         ]
         
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 3. EXECUTE REJECTION OR ASK FOR NOTE
+    # 3. COOLDOWN SELECTED -> ASK FOR SEND/NOTE
+    elif action == "sel_cd":
+        days = int(data[1])
+        target_uid = int(data[2])
+        
+        context.user_data['temp_reject_days'] = days
+        
+        # Display Confirmation
+        reason_key = context.user_data.get('temp_reject_reason', 'other')
+        display_days = f"{days} Days" if days > 0 else "None"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"✅ Send (CD: {display_days})", callback_data=f"do_reject:send:{target_uid}")],
+            [InlineKeyboardButton("📝 Add Optional Note", callback_data=f"do_reject:note:{target_uid}")],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"sel_reason:{reason_key}:{target_uid}")]
+        ]
+        
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # 4. EXECUTE REJECTION OR ASK FOR NOTE
     elif action == "do_reject":
         sub_action = data[1]
         target_uid = int(data[2])
         
         reason_key = context.user_data.get('temp_reject_reason', 'other')
+        cooldown_days = context.user_data.get('temp_reject_days', 0)
         base_reason = rejection_templates.get(reason_key, "Application Declined.")
 
         if sub_action == "send":
-            await finalize_rejection(update, context, target_uid, base_reason, None)
+            await finalize_rejection(update, context, target_uid, base_reason, None, cooldown_days=cooldown_days)
             # Unpin message
             try:
                 await context.bot.unpin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=query.message.message_id)
@@ -872,6 +1009,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             context.bot_data[f"admin_reply_{query.from_user.id}"] = {
                 'target_uid': target_uid,
                 'base_reason': base_reason,
+                'cooldown_days': cooldown_days,
                 'msg_id': query.message.message_id, # Save MSG ID for unpinning later via reply
                 'original_text': query.message.text_html
             }
@@ -989,7 +1127,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             logger.error(f"Could not notify user {user_id}: {e}")
 
 # Helper to finalize rejection (Used by Callback and MessageHandler)
-async def finalize_rejection(update, context, user_id, base_reason, custom_note, origin_msg_id=None, origin_text=None):
+async def finalize_rejection(update, context, user_id, base_reason, custom_note, origin_msg_id=None, origin_text=None, cooldown_days=0):
     # Determine who is taking the action (from callback or message)
     if update.callback_query:
         admin_user = update.callback_query.from_user
@@ -1006,11 +1144,17 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
         full_reason += f"\n\n📝 <b>Admin Note:</b>\n<i>{custom_note}</i>"
 
     # Notify User
+    cooldown_msg = ""
+    if cooldown_days > 0:
+        resume_date = (datetime.now() + timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
+        cooldown_msg = f"\n\n⏳ <b>Cooldown Active:</b>\nYou may apply again after <b>{resume_date}</b>."
+
     user_notification = (
         "⚠️ <b>Application Update</b>\n\n"
         "We appreciate your interest in AfterlifeOS.\n"
         "Unfortunately, your maintainer application has been <b>declined</b>.\n\n"
-        f"{full_reason}\n\n"
+        f"{full_reason}"
+        f"{cooldown_msg}\n\n"
         "You are welcome to apply again in the future after addressing these points."
     )
     
@@ -1027,6 +1171,8 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
         new_status = f"\n\n❌ <b>REJECTED by {admin_name}</b>\nReason: {base_reason}"
         if custom_note:
             new_status += f"\nNote: {custom_note}"
+        if cooldown_days > 0:
+            new_status += f"\nCooldown: {cooldown_days} Days"
             
         await update.callback_query.edit_message_text(
             text=original_text + new_status,
@@ -1038,6 +1184,8 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
         new_status = f"\n\n❌ <b>REJECTED by {admin_name}</b>\nReason: {base_reason}"
         if custom_note:
             new_status += f"\nNote: {custom_note}"
+        if cooldown_days > 0:
+            new_status += f"\nCooldown: {cooldown_days} Days"
             
         try:
             await context.bot.edit_message_text(
@@ -1057,13 +1205,28 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
 
     # Clean up memory with Persistence Trigger
     current_apps = context.bot_data.get('pending_apps', {})
+    saved_name = "Unknown"
+    
     if user_id in current_apps:
+        saved_name = current_apps[user_id].get('name', 'Unknown')
         del current_apps[user_id]
         context.bot_data['pending_apps'] = current_apps
 
     # CLEAR USER DATA (The interview answers)
     if user_id in context.application.user_data:
         context.application.user_data[user_id].clear()
+
+    # SET REJECTION COOLDOWN
+    if cooldown_days > 0:
+        expiry_date = datetime.now() + timedelta(days=cooldown_days)
+        cooldowns = context.bot_data.get('rejected_cooldowns', {})
+        
+        # Store structured data (Migrate from old format if needed)
+        cooldowns[user_id] = {
+            'expiry': expiry_date,
+            'name': saved_name
+        }
+        context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Persistence Save
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes_text = (
@@ -1095,6 +1258,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/add_template &lt;key&gt; &lt;text&gt;</code> - Add new template\n"
             "• <code>/edit_template &lt;key&gt; &lt;text&gt;</code> - Edit existing template\n"
             "• <code>/remove_template &lt;key&gt;</code> - Remove a template\n\n"
+            "<b>Cooldown Management:</b>\n"
+            "• <code>/check_cooldowns</code> - View active bans\n"
+            "• <code>/remove_cooldown &lt;id&gt;</code> - Unban a user\n\n"
             "<i>You can also reply to a message with /add_template &lt;key&gt; to save it.</i>"
         )
     else:
@@ -1117,12 +1283,13 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         data = context.bot_data[reply_key]
         target_uid = data['target_uid']
         base_reason = data['base_reason']
+        cooldown_days = data.get('cooldown_days', 0)
         msg_id_to_unpin = data.get('msg_id') # Get stored ID
         original_text = data.get('original_text')
         custom_note = update.message.text
         
         # Execute rejection
-        await finalize_rejection(update, context, target_uid, base_reason, custom_note, msg_id_to_unpin, original_text)
+        await finalize_rejection(update, context, target_uid, base_reason, custom_note, msg_id_to_unpin, original_text, cooldown_days)
         
         # Unpin if ID exists
         if msg_id_to_unpin:
@@ -1180,6 +1347,10 @@ def main():
     app.add_handler(CommandHandler("add_template", add_template))
     app.add_handler(CommandHandler("edit_template", edit_template))
     app.add_handler(CommandHandler("remove_template", remove_template))
+    
+    # Cooldown Management Commands
+    app.add_handler(CommandHandler("check_cooldowns", check_cooldowns))
+    app.add_handler(CommandHandler("remove_cooldown", remove_cooldown))
 
     # Handler for Admin Replies
     app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND, handle_admin_reply))
