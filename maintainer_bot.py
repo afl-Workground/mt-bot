@@ -190,6 +190,9 @@ def format_link(url, text="Link"):
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != 'private':
+        return ConversationHandler.END
+
     user = update.message.from_user
     logger.info(f"User {user.first_name} started conversation.")
     
@@ -673,6 +676,9 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != 'private':
+        return ConversationHandler.END
+
     await update.message.reply_text("🚫 <b>Operation Cancelled.</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove(), disable_web_page_preview=True)
     return ConversationHandler.END
 
@@ -1265,6 +1271,9 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
     push_to_github('bot_data.pickle', f"Update Data: User {user_id} Rejected")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != 'private':
+        return
+
     notes_text = (
         "<b>📋 Project Notes & Guidelines</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
