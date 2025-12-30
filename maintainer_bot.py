@@ -5,6 +5,7 @@ import re
 import base64
 import json
 import requests # Need requests library
+import subprocess # For Git commands
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION & SETUP ---
@@ -705,10 +706,32 @@ def save_templates(templates):
     try:
         with open(TEMPLATES_FILE, 'w') as f:
             json.dump(templates, f, indent=4)
+        
+        # Auto-Push Templates
+        push_to_github('templates.json', 'Update rejection templates [Bot]')
         return True
     except Exception as e:
         logger.error(f"Error saving templates: {e}")
         return False
+
+def push_to_github(filename, commit_msg):
+    try:
+        # 1. Git Add
+        # cwd=base_dir ensures we run git commands inside the bot folder, 
+        # regardless of where the python script was called from.
+        subprocess.run(["git", "add", filename], check=True, capture_output=True, cwd=base_dir)
+        
+        # 2. Git Commit
+        subprocess.run(["git", "commit", "-m", commit_msg], check=False, capture_output=True, cwd=base_dir)
+        
+        # 3. Git Push
+        subprocess.run(["git", "push"], check=True, capture_output=True, cwd=base_dir)
+        
+        logger.info(f"✅ Auto-pushed {filename} to GitHub.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Git Push Failed for {filename}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Git Error: {e}")
 
 # Load templates into memory on start
 rejection_templates = load_templates()
@@ -891,6 +914,11 @@ async def remove_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_id in cooldowns:
         del cooldowns[target_id]
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Save
+        
+        # FORCE SAVE & GIT PUSH
+        await context.application.persistence.flush()
+        push_to_github('bot_data.pickle', f"Update Data: Removed Cooldown for {target_id}")
+        
         await update.message.reply_text(f"✅ Cooldown removed for user <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
     else:
         await update.message.reply_text(f"⚠️ User ID <code>{target_id}</code> is not in the cooldown list.", parse_mode=ParseMode.HTML)
@@ -1097,6 +1125,10 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             # CLEAR USER DATA (The interview answers)
             if user_id in context.application.user_data:
                 context.application.user_data[user_id].clear()
+            
+            # FORCE SAVE & GIT PUSH
+            await context.application.persistence.flush()
+            push_to_github('bot_data.pickle', f"Update Data: User {user_id} Accepted")
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -1227,6 +1259,10 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
             'name': saved_name
         }
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Persistence Save
+
+    # FORCE SAVE & GIT PUSH
+    await context.application.persistence.flush()
+    push_to_github('bot_data.pickle', f"Update Data: User {user_id} Rejected")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes_text = (
