@@ -1,0 +1,1 @@
+worker: python maintainer_bot.py

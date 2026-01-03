@@ -10,16 +10,12 @@ from datetime import datetime, timedelta
 
 # --- CONFIGURATION & SETUP ---
 
-sys.path.append(os.path.expanduser("~/pylib"))
-
+# Try to load .env file (optional, for local development)
 try:
     from dotenv import load_dotenv
+    load_dotenv()
 except ImportError:
-    print("❌ Error: 'python-dotenv' library is not found.")
-    sys.exit(1)
-
-base_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(dotenv_path=os.path.join(base_dir, 'private.env'))
+    pass # python-dotenv not installed or not needed in prod
 
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = os.getenv('ADMIN_ID')
@@ -30,6 +26,9 @@ GH_TOKEN = os.getenv('GITHUB_TOKEN')
 GH_REPO = os.getenv('GITHUB_REPO')       # e.g., AfterlifeOS/vendor_signed
 GH_PATH = os.getenv('GITHUB_FILE_PATH')  # e.g., signed.mk
 GH_BRANCH = os.getenv('GITHUB_BRANCH')   # e.g., 16
+
+# SELF-UPDATE CONFIG (For bot_data.pickle and templates.json)
+BOT_REPO = os.getenv('BOT_REPO') # e.g. AfterlifeOS/maintainer-bot-source
 
 # WELCOME LINKS
 LINK_DEVICE_LIST = os.getenv('LINK_DEVICE_LIST', 'https://google.com')
@@ -721,21 +720,40 @@ def save_templates(templates):
         return False
 
 def push_to_github(filename, commit_msg):
+    if not GH_TOKEN or not BOT_REPO:
+        logger.warning(f"⚠️ Skipping auto-push for {filename}: GH_TOKEN or BOT_REPO not set.")
+        return
+
     try:
-        # 1. Git Add
-        # cwd=base_dir ensures we run git commands inside the bot folder, 
-        # regardless of where the python script was called from.
+        # 1. Configure Git Identity (Required in Cloud/CI)
+        subprocess.run(["git", "config", "user.email", "bot@afterlifeos.com"], check=False, cwd=base_dir)
+        subprocess.run(["git", "config", "user.name", "Afterlife Bot"], check=False, cwd=base_dir)
+
+        # 2. Set Authenticated Remote URL
+        # Format: https://TOKEN@github.com/User/Repo.git
+        remote_url = f"https://{GH_TOKEN}@github.com/{BOT_REPO}.git"
+        subprocess.run(["git", "remote", "set-url", "origin", remote_url], check=False, cwd=base_dir)
+
+        # 3. Git Add
         subprocess.run(["git", "add", filename], check=True, capture_output=True, cwd=base_dir)
         
-        # 2. Git Commit
+        # 4. Git Commit
         subprocess.run(["git", "commit", "-m", commit_msg], check=False, capture_output=True, cwd=base_dir)
         
-        # 3. Git Push
-        subprocess.run(["git", "push"], check=True, capture_output=True, cwd=base_dir)
+        # 5. Git Push (Force HEAD to configured branch or main)
+        target_branch = GH_BRANCH if GH_BRANCH else "main"
+        # We try to push to the detected branch. If GH_BRANCH is set for the other repo, 
+        # make sure it matches this one or just use 'main'/'master' if unsure.
+        # Ideally, we should detect the current branch:
+        curr_branch_proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, cwd=base_dir)
+        curr_branch = curr_branch_proc.stdout.strip() if curr_branch_proc.returncode == 0 else "main"
+
+        subprocess.run(["git", "push", "origin", curr_branch], check=True, capture_output=True, cwd=base_dir)
         
-        logger.info(f"✅ Auto-pushed {filename} to GitHub.")
+        logger.info(f"✅ Auto-pushed {filename} to GitHub ({BOT_REPO}).")
     except subprocess.CalledProcessError as e:
-        logger.error(f"❌ Git Push Failed for {filename}: {e}")
+        err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+        logger.error(f"❌ Git Push Failed for {filename}: {err_msg}")
     except Exception as e:
         logger.error(f"❌ Git Error: {e}")
 
