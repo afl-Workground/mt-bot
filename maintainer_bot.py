@@ -670,6 +670,11 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to pin message: {e}")
             
         await update.message.reply_text(user_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+        # Force Save & Cloud Sync
+        await context.application.persistence.flush()
+        sync_data_to_cloud()
+
     except Exception as e:
         logger.error(f"Failed to send: {e}")
         await update.message.reply_text("❌ Error sending application.")
@@ -686,7 +691,92 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_suitability(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await finalize(update, context)
 
-# --- TEMPLATE MANAGEMENT (JSON) ---
+# --- GITHUB API HELPERS (No Local Git) ---
+def get_github_headers():
+    return {
+        "Authorization": f"token {GH_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+def download_file_from_github(filename):
+    """Downloads a file from the BOT_REPO and saves it locally."""
+    if not GH_TOKEN or not BOT_REPO:
+        logger.warning(f"⚠️ GitHub Sync Config Missing. Using local {filename} only.")
+        return False
+
+    url = f"https://api.github.com/repos/{BOT_REPO}/contents/{filename}"
+    params = {'ref': GH_BRANCH} if GH_BRANCH else {}
+    
+    try:
+        r = requests.get(url, headers=get_github_headers(), params=params)
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()['content'])
+            
+            # Write safely to local path
+            local_path = os.path.join(base_dir, filename)
+            # Write binary for pickle, text for json (handled by mode 'wb')
+            with open(local_path, 'wb') as f:
+                f.write(content)
+            logger.info(f"✅ Downloaded {filename} from GitHub.")
+            return True
+        elif r.status_code == 404:
+            logger.info(f"ℹ️ {filename} not found on GitHub. Starting fresh.")
+        else:
+            logger.error(f"❌ Failed to download {filename}: {r.status_code}")
+    except Exception as e:
+        logger.error(f"❌ Error downloading {filename}: {e}")
+    return False
+
+def upload_file_to_github(filename, commit_msg):
+    """Reads a local file and uploads/updates it on BOT_REPO."""
+    if not GH_TOKEN or not BOT_REPO:
+        return
+
+    local_path = os.path.join(base_dir, filename)
+    if not os.path.exists(local_path):
+        return
+
+    url = f"https://api.github.com/repos/{BOT_REPO}/contents/{filename}"
+    headers = get_github_headers()
+    params = {'ref': GH_BRANCH} if GH_BRANCH else {}
+
+    try:
+        # 1. Read Local Content
+        with open(local_path, 'rb') as f:
+            content = f.read()
+        content_b64 = base64.b64encode(content).decode('utf-8')
+
+        # 2. Get SHA of existing file (if any) to update it
+        sha = None
+        r_get = requests.get(url, headers=headers, params=params)
+        if r_get.status_code == 200:
+            sha = r_get.json()['sha']
+
+        # 3. PUT (Create or Update)
+        payload = {
+            "message": commit_msg,
+            "content": content_b64
+        }
+        if sha: payload['sha'] = sha
+        if GH_BRANCH: payload['branch'] = GH_BRANCH
+
+        r_put = requests.put(url, headers=headers, json=payload)
+        if r_put.status_code in [200, 201]:
+            logger.info(f"☁️ Synced {filename} to GitHub.")
+        else:
+            logger.error(f"❌ Sync failed for {filename}: {r_put.status_code} {r_put.text}")
+
+    except Exception as e:
+        logger.error(f"❌ Upload Error {filename}: {e}")
+
+# Replaces old push_to_github logic
+def sync_data_to_cloud():
+    """Triggers upload for both templates and bot data."""
+    # We call this manually after important changes
+    upload_file_to_github('templates.json', 'Update templates.json [Bot]')
+    upload_file_to_github('bot_data.pickle', 'Update bot_data.pickle [Bot]')
+
+# --- TEMPLATE MANAGEMENT ---
 TEMPLATES_FILE = os.path.join(base_dir, 'templates.json')
 
 DEFAULT_TEMPLATES = {
@@ -699,9 +789,12 @@ DEFAULT_TEMPLATES = {
 }
 
 def load_templates():
+    # Attempt download from Cloud first
+    download_file_from_github('templates.json')
+    
     if not os.path.exists(TEMPLATES_FILE):
-        save_templates(DEFAULT_TEMPLATES)
         return DEFAULT_TEMPLATES
+        
     try:
         with open(TEMPLATES_FILE, 'r') as f:
             return json.load(f)
@@ -714,50 +807,12 @@ def save_templates(templates):
         with open(TEMPLATES_FILE, 'w') as f:
             json.dump(templates, f, indent=4)
         
-        # Auto-Push Templates
-        push_to_github('templates.json', 'Update rejection templates [Bot]')
+        # Trigger Cloud Sync
+        upload_file_to_github('templates.json', 'Update rejection templates [Bot]')
         return True
     except Exception as e:
         logger.error(f"Error saving templates: {e}")
         return False
-
-def push_to_github(filename, commit_msg):
-    if not GH_TOKEN or not BOT_REPO:
-        logger.warning(f"⚠️ Skipping auto-push for {filename}: GH_TOKEN or BOT_REPO not set.")
-        return
-
-    try:
-        # 1. Configure Git Identity (Required in Cloud/CI)
-        subprocess.run(["git", "config", "user.email", "bot@afterlifeos.com"], check=False, cwd=base_dir)
-        subprocess.run(["git", "config", "user.name", "Afterlife Bot"], check=False, cwd=base_dir)
-
-        # 2. Set Authenticated Remote URL
-        # Format: https://TOKEN@github.com/User/Repo.git
-        remote_url = f"https://{GH_TOKEN}@github.com/{BOT_REPO}.git"
-        subprocess.run(["git", "remote", "set-url", "origin", remote_url], check=False, cwd=base_dir)
-
-        # 3. Git Add
-        subprocess.run(["git", "add", filename], check=True, capture_output=True, cwd=base_dir)
-        
-        # 4. Git Commit
-        subprocess.run(["git", "commit", "-m", commit_msg], check=False, capture_output=True, cwd=base_dir)
-        
-        # 5. Git Push (Force HEAD to configured branch or main)
-        target_branch = GH_BRANCH if GH_BRANCH else "main"
-        # We try to push to the detected branch. If GH_BRANCH is set for the other repo, 
-        # make sure it matches this one or just use 'main'/'master' if unsure.
-        # Ideally, we should detect the current branch:
-        curr_branch_proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, cwd=base_dir)
-        curr_branch = curr_branch_proc.stdout.strip() if curr_branch_proc.returncode == 0 else "main"
-
-        subprocess.run(["git", "push", "origin", curr_branch], check=True, capture_output=True, cwd=base_dir)
-        
-        logger.info(f"✅ Auto-pushed {filename} to GitHub ({BOT_REPO}).")
-    except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-        logger.error(f"❌ Git Push Failed for {filename}: {err_msg}")
-    except Exception as e:
-        logger.error(f"❌ Git Error: {e}")
 
 # Load templates into memory on start
 rejection_templates = load_templates()
@@ -941,9 +996,9 @@ async def remove_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del cooldowns[target_id]
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Save
         
-        # FORCE SAVE & GIT PUSH
+        # FORCE SAVE & CLOUD SYNC
         await context.application.persistence.flush()
-        push_to_github('bot_data.pickle', f"Update Data: Removed Cooldown for {target_id}")
+        sync_data_to_cloud()
         
         await update.message.reply_text(f"✅ Cooldown removed for user <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
     else:
@@ -1152,9 +1207,9 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             if user_id in context.application.user_data:
                 context.application.user_data[user_id].clear()
             
-            # FORCE SAVE & GIT PUSH
+            # FORCE SAVE & CLOUD SYNC
             await context.application.persistence.flush()
-            push_to_github('bot_data.pickle', f"Update Data: User {user_id} Accepted")
+            sync_data_to_cloud()
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -1286,9 +1341,9 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
         }
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Persistence Save
 
-    # FORCE SAVE & GIT PUSH
+    # FORCE SAVE & CLOUD SYNC
     await context.application.persistence.flush()
-    push_to_github('bot_data.pickle', f"Update Data: User {user_id} Rejected")
+    sync_data_to_cloud()
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != 'private':
@@ -1370,6 +1425,11 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
 def main():
+    # 1. Restore Data from Cloud (GitHub)
+    logger.info("☁️ Syncing data from GitHub...")
+    download_file_from_github('bot_data.pickle')
+    # templates.json is already loaded by load_templates() global call
+
     # Persistence setup: Stores data to 'bot_data.pickle' in the same directory as the script
     data_path = os.path.join(base_dir, 'bot_data.pickle')
     my_persistence = PicklePersistence(filepath=data_path)
