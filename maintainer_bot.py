@@ -27,7 +27,7 @@ MAINTAINER_GROUP_ID = os.getenv('MAINTAINER_GROUP_ID')
 GH_TOKEN = os.getenv('GITHUB_TOKEN')
 GH_REPO = os.getenv('GITHUB_REPO')       # e.g., AfterlifeOS/vendor_signed
 GH_PATH = os.getenv('GITHUB_FILE_PATH')  # e.g., signed.mk
-GH_BRANCH = os.getenv('GITHUB_BRANCH')   # e.g., 16
+GH_BRANCH = os.getenv('GITHUB_BRANCH')   # Optional: Leave empty to use Default Branch (main/master)
 
 # SELF-UPDATE CONFIG (For bot_data.pickle and templates.json)
 BOT_REPO = os.getenv('BOT_REPO') # e.g. AfterlifeOS/maintainer-bot-source
@@ -705,7 +705,8 @@ def download_file_from_github(filename):
         return False
 
     url = f"https://api.github.com/repos/{BOT_REPO}/contents/{filename}"
-    params = {'ref': GH_BRANCH} if GH_BRANCH else {}
+    # Use default branch for Bot Data (Do not use GH_BRANCH here)
+    params = {}
     
     try:
         r = requests.get(url, headers=get_github_headers(), params=params)
@@ -738,7 +739,8 @@ def upload_file_to_github(filename, commit_msg):
 
     url = f"https://api.github.com/repos/{BOT_REPO}/contents/{filename}"
     headers = get_github_headers()
-    params = {'ref': GH_BRANCH} if GH_BRANCH else {}
+    # Use default branch for Bot Data
+    params = {}
 
     try:
         # 1. Read Local Content
@@ -758,7 +760,7 @@ def upload_file_to_github(filename, commit_msg):
             "content": content_b64
         }
         if sha: payload['sha'] = sha
-        if GH_BRANCH: payload['branch'] = GH_BRANCH
+        # Do not force branch here, let it use default
 
         r_put = requests.put(url, headers=headers, json=payload)
         if r_put.status_code in [200, 201]:
