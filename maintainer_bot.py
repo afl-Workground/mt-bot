@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 
 # --- CONFIGURATION & SETUP ---
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
 # Try to load .env file (optional, for local development)
 try:
     from dotenv import load_dotenv
