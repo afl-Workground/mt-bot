@@ -673,7 +673,7 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Force Save & Cloud Sync
         await context.application.persistence.flush()
-        sync_data_to_cloud()
+        upload_file_to_github('bot_data.pickle', 'Update Pending Apps [Bot]')
 
     except Exception as e:
         logger.error(f"Failed to send: {e}")
@@ -729,7 +729,7 @@ def download_file_from_github(filename):
     return False
 
 def upload_file_to_github(filename, commit_msg):
-    """Reads a local file and uploads/updates it on BOT_REPO."""
+    """Reads a local file and uploads/updates it on BOT_REPO only if content changed."""
     if not GH_TOKEN or not BOT_REPO:
         return
 
@@ -745,23 +745,36 @@ def upload_file_to_github(filename, commit_msg):
     try:
         # 1. Read Local Content
         with open(local_path, 'rb') as f:
-            content = f.read()
-        content_b64 = base64.b64encode(content).decode('utf-8')
-
-        # 2. Get SHA of existing file (if any) to update it
+            local_content = f.read()
+        
+        # 2. Get Remote Content & SHA
         sha = None
         r_get = requests.get(url, headers=headers, params=params)
+        
         if r_get.status_code == 200:
-            sha = r_get.json()['sha']
-
-        # 3. PUT (Create or Update)
+            file_data = r_get.json()
+            sha = file_data['sha']
+            remote_content_b64 = file_data['content']
+            
+            # Decode and Compare
+            # GitHub API adds newlines to base64 strings, clean them before decoding might be safer, 
+            # but standard b64decode handles it.
+            remote_content = base64.b64decode(remote_content_b64)
+            
+            if local_content == remote_content:
+                logger.info(f"zzz {filename} unchanged. Skipping push.")
+                return # EXIT EARLY - No Change
+        
+        # 3. Prepare Payload
+        content_b64 = base64.b64encode(local_content).decode('utf-8')
+        
         payload = {
             "message": commit_msg,
             "content": content_b64
         }
         if sha: payload['sha'] = sha
-        # Do not force branch here, let it use default
-
+        
+        # 4. PUT (Commit)
         r_put = requests.put(url, headers=headers, json=payload)
         if r_put.status_code in [200, 201]:
             logger.info(f"☁️ Synced {filename} to GitHub.")
@@ -771,12 +784,8 @@ def upload_file_to_github(filename, commit_msg):
     except Exception as e:
         logger.error(f"❌ Upload Error {filename}: {e}")
 
-# Replaces old push_to_github logic
-def sync_data_to_cloud():
-    """Triggers upload for both templates and bot data."""
-    # We call this manually after important changes
-    upload_file_to_github('templates.json', 'Update templates.json [Bot]')
-    upload_file_to_github('bot_data.pickle', 'Update bot_data.pickle [Bot]')
+# Remove generic sync function to avoid mass-pushing
+# def sync_data_to_cloud(): ... (Removed)
 
 # --- TEMPLATE MANAGEMENT ---
 TEMPLATES_FILE = os.path.join(base_dir, 'templates.json')
@@ -1000,7 +1009,7 @@ async def remove_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # FORCE SAVE & CLOUD SYNC
         await context.application.persistence.flush()
-        sync_data_to_cloud()
+        upload_file_to_github('bot_data.pickle', f"Remove Cooldown {target_id} [Bot]")
         
         await update.message.reply_text(f"✅ Cooldown removed for user <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
     else:
@@ -1211,7 +1220,7 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             
             # FORCE SAVE & CLOUD SYNC
             await context.application.persistence.flush()
-            sync_data_to_cloud()
+            upload_file_to_github('bot_data.pickle', f"User {user_id} Accepted [Bot]")
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -1345,7 +1354,7 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
 
     # FORCE SAVE & CLOUD SYNC
     await context.application.persistence.flush()
-    sync_data_to_cloud()
+    upload_file_to_github('bot_data.pickle', f"User {user_id} Rejected [Bot]")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != 'private':
