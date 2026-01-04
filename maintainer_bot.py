@@ -6,6 +6,8 @@ import base64
 import json
 import requests # Need requests library
 import subprocess # For Git commands
+import redis # Redis library
+import pickle
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION & SETUP ---
@@ -22,6 +24,7 @@ except ImportError:
 API_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = os.getenv('ADMIN_ID')
 MAINTAINER_GROUP_ID = os.getenv('MAINTAINER_GROUP_ID')
+REDIS_URL = os.getenv('REDIS_URL') # Redis Connection String
 
 # GITHUB CONFIG
 GH_TOKEN = os.getenv('GITHUB_TOKEN')
@@ -29,7 +32,7 @@ GH_REPO = os.getenv('GITHUB_REPO')       # e.g., AfterlifeOS/vendor_signed
 GH_PATH = os.getenv('GITHUB_FILE_PATH')  # e.g., signed.mk
 GH_BRANCH = os.getenv('GITHUB_BRANCH')   # Optional: Leave empty to use Default Branch (main/master)
 
-# SELF-UPDATE CONFIG (For bot_data.pickle and templates.json)
+# SELF-UPDATE CONFIG (For templates.json only now)
 BOT_REPO = os.getenv('BOT_REPO') # e.g. AfterlifeOS/maintainer-bot-source
 
 # WELCOME LINKS
@@ -61,13 +64,78 @@ try:
         ConversationHandler,
         ContextTypes,
         CallbackQueryHandler,
-        PicklePersistence
+        BasePersistence, 
+        PersistenceInput
     )
 except ImportError as e:
     print(f"❌ Error importing telegram library: {e}")
     sys.exit(1)
 
 logger = logging.getLogger(__name__)
+
+# --- REDIS PERSISTENCE CLASS ---
+class RedisPersistence(BasePersistence):
+    def __init__(self, url):
+        self.redis = redis.from_url(url)
+        super().__init__(store_data=PersistenceInput(bot_data=True, user_data=True, chat_data=True, callback_data=False))
+
+    async def get_bot_data(self):
+        data = self.redis.get("bot_data")
+        return pickle.loads(data) if data else {}
+
+    async def update_bot_data(self, data):
+        self.redis.set("bot_data", pickle.dumps(data))
+
+    async def refresh_bot_data(self, bot_data):
+        return await self.get_bot_data()
+
+    async def get_user_data(self):
+        data = self.redis.get("user_data")
+        return pickle.loads(data) if data else {}
+
+    async def update_user_data(self, user_id, data):
+        # We need to load all user data, update specific, and save back? 
+        # BasePersistence structure treats user_data as a whole dict usually in memory.
+        # Efficient Redis impl would use HSET, but for compatibility with BasePersistence simple dump:
+        # NOTE: PTB saves all user_data as a dict {user_id: data}.
+        # For simplicity and migration, we will treat the whole user_data storage as one pickle blob unless massive.
+        pass # PTB Default implementation handles in-memory and calls flush() which calls update_user_data with ALL data?
+             # No, update_user_data is called with (user_id, data).
+             
+        # Optimized for PTB: We will use a Hash Map in Redis. Key="user_data", Field=user_id
+        self.redis.hset("user_data", str(user_id), pickle.dumps(data))
+
+    async def get_chat_data(self):
+        data = self.redis.get("chat_data")
+        return pickle.loads(data) if data else {}
+
+    async def update_chat_data(self, chat_id, data):
+        self.redis.hset("chat_data", str(chat_id), pickle.dumps(data))
+        
+    async def get_callback_data(self):
+        return None
+    async def update_callback_data(self, data):
+        pass
+    async def get_conversations(self, name):
+        data = self.redis.get(f"conv_{name}")
+        return pickle.loads(data) if data else {}
+    async def update_conversation(self, name, key, new_state):
+        # Load, Update, Save
+        current = await self.get_conversations(name)
+        current[key] = new_state
+        self.redis.set(f"conv_{name}", pickle.dumps(current))
+    async def flush(self):
+        pass # Redis sets are atomic/immediate enough
+
+    # Override getting full dicts for init
+    async def get_user_data(self):
+        # Return all user data as {int(id): data}
+        raw = self.redis.hgetall("user_data")
+        return {int(k): pickle.loads(v) for k, v in raw.items()}
+        
+    async def get_chat_data(self):
+        raw = self.redis.hgetall("chat_data")
+        return {int(k): pickle.loads(v) for k, v in raw.items()}
 
 # --- WELCOME HANDLER ---
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -671,9 +739,8 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         await update.message.reply_text(user_msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
-        # Force Save & Cloud Sync
+        # Force Save (Redis updates automatically on flush/update, but flush ensures it)
         await context.application.persistence.flush()
-        upload_file_to_github('bot_data.pickle', 'Update Pending Apps [Bot]')
 
     except Exception as e:
         logger.error(f"Failed to send: {e}")
@@ -1007,9 +1074,8 @@ async def remove_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del cooldowns[target_id]
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Save
         
-        # FORCE SAVE & CLOUD SYNC
+        # FORCE SAVE
         await context.application.persistence.flush()
-        upload_file_to_github('bot_data.pickle', f"Remove Cooldown {target_id} [Bot]")
         
         await update.message.reply_text(f"✅ Cooldown removed for user <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
     else:
@@ -1218,9 +1284,8 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
             if user_id in context.application.user_data:
                 context.application.user_data[user_id].clear()
             
-            # FORCE SAVE & CLOUD SYNC
+            # FORCE SAVE
             await context.application.persistence.flush()
-            upload_file_to_github('bot_data.pickle', f"User {user_id} Accepted [Bot]")
         else:
             github_status = "\n\n⚠️ <b>GitHub Action:</b>\nCould not find user data in memory."
 
@@ -1352,9 +1417,8 @@ async def finalize_rejection(update, context, user_id, base_reason, custom_note,
         }
         context.bot_data['rejected_cooldowns'] = cooldowns # Trigger Persistence Save
 
-    # FORCE SAVE & CLOUD SYNC
+    # FORCE SAVE
     await context.application.persistence.flush()
-    upload_file_to_github('bot_data.pickle', f"User {user_id} Rejected [Bot]")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != 'private':
@@ -1436,14 +1500,59 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
 def main():
-    # 1. Restore Data from Cloud (GitHub)
-    logger.info("☁️ Syncing data from GitHub...")
-    download_file_from_github('bot_data.pickle')
-    # templates.json is already loaded by load_templates() global call
+    if not REDIS_URL:
+        logger.error("❌ REDIS_URL not found in env. Cannot start.")
+        sys.exit(1)
 
-    # Persistence setup: Stores data to 'bot_data.pickle' in the same directory as the script
-    data_path = os.path.join(base_dir, 'bot_data.pickle')
-    my_persistence = PicklePersistence(filepath=data_path)
+    # Persistence setup
+    my_persistence = RedisPersistence(url=REDIS_URL)
+
+    # --- ONE-TIME MIGRATION LOGIC ---
+    # Check if Redis has data. If not, try to import from GitHub one last time.
+    try:
+        r = redis.from_url(REDIS_URL)
+        if not r.exists("bot_data") and not r.exists("user_data"):
+            logger.info("ℹ️ Redis empty. Attempting migration from GitHub pickle...")
+            
+            local_pickle = os.path.join(base_dir, 'bot_data.pickle')
+            if download_file_from_github('bot_data.pickle'):
+                with open(local_pickle, 'rb') as f:
+                    old_blob = pickle.load(f)
+                
+                # PTB PicklePersistence usually stores data in a dict: 
+                # {'bot_data': {}, 'user_data': {}, 'chat_data': {}, 'conversations': {}}
+                
+                # 1. Migrate BOT_DATA
+                if 'bot_data' in old_blob:
+                    r.set("bot_data", pickle.dumps(old_blob['bot_data']))
+                    logger.info(f"✅ Migrated bot_data")
+                
+                # 2. Migrate USER_DATA (Convert to Hash Map)
+                if 'user_data' in old_blob:
+                    u_data = old_blob['user_data']
+                    for uid, data in u_data.items():
+                        r.hset("user_data", str(uid), pickle.dumps(data))
+                    logger.info(f"✅ Migrated user_data ({len(u_data)} users)")
+
+                # 3. Migrate CHAT_DATA
+                if 'chat_data' in old_blob:
+                    c_data = old_blob['chat_data']
+                    for cid, data in c_data.items():
+                        r.hset("chat_data", str(cid), pickle.dumps(data))
+                    logger.info(f"✅ Migrated chat_data")
+                
+                # 4. Migrate CONVERSATIONS (If any)
+                if 'conversations' in old_blob:
+                    conv_data = old_blob['conversations']
+                    for name, state in conv_data.items():
+                        r.set(f"conv_{name}", pickle.dumps(state))
+                    logger.info(f"✅ Migrated conversations")
+
+                logger.info("🎉 Full Migration to Redis Complete!")
+                # Cleanup local file
+                os.remove(local_pickle)
+    except Exception as e:
+        logger.error(f"⚠️ Migration warning: {e}")
 
     app = Application.builder().token(API_TOKEN).persistence(my_persistence).build()
     
