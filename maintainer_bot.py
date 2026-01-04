@@ -1505,53 +1505,6 @@ def main():
     # Persistence setup
     my_persistence = RedisPersistence(url=REDIS_URL)
 
-    # --- ONE-TIME MIGRATION LOGIC ---
-    # Check if Redis has data. If not, try to import from GitHub one last time.
-    try:
-        r = redis.from_url(REDIS_URL)
-        if not r.exists("bot_data") and not r.exists("user_data"):
-            logger.info("ℹ️ Redis empty. Attempting migration from GitHub pickle...")
-            
-            local_pickle = os.path.join(base_dir, 'bot_data.pickle')
-            if download_file_from_github('bot_data.pickle'):
-                with open(local_pickle, 'rb') as f:
-                    old_blob = pickle.load(f)
-                
-                # PTB PicklePersistence usually stores data in a dict: 
-                # {'bot_data': {}, 'user_data': {}, 'chat_data': {}, 'conversations': {}}
-                
-                # 1. Migrate BOT_DATA
-                if 'bot_data' in old_blob:
-                    r.set("bot_data", pickle.dumps(old_blob['bot_data']))
-                    logger.info(f"✅ Migrated bot_data")
-                
-                # 2. Migrate USER_DATA (Convert to Hash Map)
-                if 'user_data' in old_blob:
-                    u_data = old_blob['user_data']
-                    for uid, data in u_data.items():
-                        r.hset("user_data", str(uid), pickle.dumps(data))
-                    logger.info(f"✅ Migrated user_data ({len(u_data)} users)")
-
-                # 3. Migrate CHAT_DATA
-                if 'chat_data' in old_blob:
-                    c_data = old_blob['chat_data']
-                    for cid, data in c_data.items():
-                        r.hset("chat_data", str(cid), pickle.dumps(data))
-                    logger.info(f"✅ Migrated chat_data")
-                
-                # 4. Migrate CONVERSATIONS (If any)
-                if 'conversations' in old_blob:
-                    conv_data = old_blob['conversations']
-                    for name, state in conv_data.items():
-                        r.set(f"conv_{name}", pickle.dumps(state))
-                    logger.info(f"✅ Migrated conversations")
-
-                logger.info("🎉 Full Migration to Redis Complete!")
-                # Cleanup local file
-                os.remove(local_pickle)
-    except Exception as e:
-        logger.error(f"⚠️ Migration warning: {e}")
-
     app = Application.builder().token(API_TOKEN).persistence(my_persistence).build()
     
     conv_handler = ConversationHandler(
