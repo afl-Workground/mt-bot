@@ -90,27 +90,35 @@ class RedisPersistence(BasePersistence):
         return await self.get_bot_data()
 
     async def get_user_data(self):
-        data = self.redis.get("user_data")
-        return pickle.loads(data) if data else {}
+        # Return all user data as {int(id): data}
+        raw = self.redis.hgetall("user_data")
+        return {int(k): pickle.loads(v) for k, v in raw.items()}
 
     async def update_user_data(self, user_id, data):
-        # We need to load all user data, update specific, and save back? 
-        # BasePersistence structure treats user_data as a whole dict usually in memory.
-        # Efficient Redis impl would use HSET, but for compatibility with BasePersistence simple dump:
-        # NOTE: PTB saves all user_data as a dict {user_id: data}.
-        # For simplicity and migration, we will treat the whole user_data storage as one pickle blob unless massive.
-        pass # PTB Default implementation handles in-memory and calls flush() which calls update_user_data with ALL data?
-             # No, update_user_data is called with (user_id, data).
-             
-        # Optimized for PTB: We will use a Hash Map in Redis. Key="user_data", Field=user_id
         self.redis.hset("user_data", str(user_id), pickle.dumps(data))
 
-    async def get_chat_data(self):
-        data = self.redis.get("chat_data")
+    async def refresh_user_data(self, user_id, user_data):
+        # Reload specific user data from Redis
+        data = self.redis.hget("user_data", str(user_id))
         return pickle.loads(data) if data else {}
+
+    async def drop_user_data(self, user_id):
+        self.redis.hdel("user_data", str(user_id))
+
+    async def get_chat_data(self):
+        raw = self.redis.hgetall("chat_data")
+        return {int(k): pickle.loads(v) for k, v in raw.items()}
 
     async def update_chat_data(self, chat_id, data):
         self.redis.hset("chat_data", str(chat_id), pickle.dumps(data))
+
+    async def refresh_chat_data(self, chat_id, chat_data):
+        # Reload specific chat data from Redis
+        data = self.redis.hget("chat_data", str(chat_id))
+        return pickle.loads(data) if data else {}
+
+    async def drop_chat_data(self, chat_id):
+        self.redis.hdel("chat_data", str(chat_id))
         
     async def get_callback_data(self):
         return None
@@ -126,16 +134,6 @@ class RedisPersistence(BasePersistence):
         self.redis.set(f"conv_{name}", pickle.dumps(current))
     async def flush(self):
         pass # Redis sets are atomic/immediate enough
-
-    # Override getting full dicts for init
-    async def get_user_data(self):
-        # Return all user data as {int(id): data}
-        raw = self.redis.hgetall("user_data")
-        return {int(k): pickle.loads(v) for k, v in raw.items()}
-        
-    async def get_chat_data(self):
-        raw = self.redis.hgetall("chat_data")
-        return {int(k): pickle.loads(v) for k, v in raw.items()}
 
 # --- WELCOME HANDLER ---
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
